@@ -1,0 +1,8 @@
+version: '3.8'
+services:
+  femboy-polaris:
+    build: .
+    container_name: femboy-polaris-${ENV_NAME}
+    restart: unless-stopped
+    env_file:
+      - stack.env # Portainer will inject environment variables here
