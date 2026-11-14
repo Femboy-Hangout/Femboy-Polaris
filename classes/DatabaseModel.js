@@ -83,6 +83,9 @@ class Model {
         this.inflight = new Map();
         this.pendingUpdates = new Map();
 
+        this.dirtyBuffer = new Map();
+        this.flushTimer = null;
+
         this.hydrateSettings = (rawSettings, rawInfo, id) => {
             try {
                 const temp = new this.model({
@@ -123,9 +126,81 @@ class Model {
             };
         };
 
+        // Incremental O(log N) update for a single user in the cached rankings array
+        // Avoids re-iterating and re-sorting 111,548 users on every single chat message!
+        this.updateSingleUserRanking = (cached, userID, oldXP, oldHidden, newXP, newHidden) => {
+            const sc = cached._sortedCache;
+            if (!sc) return;
+
+            const xpArray = sc.xpArray;
+            const hiddenMembers = sc.hiddenMembers;
+
+            // 1. Remove from previous location if previously ranked (> 0 XP)
+            if (oldXP > 0) {
+                if (oldHidden) {
+                    const hIdx = hiddenMembers.findIndex(x => x.id === userID);
+                    if (hIdx !== -1) hiddenMembers.splice(hIdx, 1);
+                } else {
+                    // Binary search for oldXP range in descending xpArray
+                    let lo = 0, hi = xpArray.length - 1, foundIdx = -1;
+                    while (lo <= hi) {
+                        const mid = (lo + hi) >>> 1;
+                        const midXP = xpArray[mid].xp;
+                        if (midXP === oldXP) {
+                            // Scan nearby ties for exact userID
+                            for (let i = mid; i >= 0 && xpArray[i].xp === oldXP; i--) {
+                                if (xpArray[i].id === userID) { foundIdx = i; break; }
+                            }
+                            if (foundIdx === -1) {
+                                for (let i = mid + 1; i < xpArray.length && xpArray[i].xp === oldXP; i++) {
+                                    if (xpArray[i].id === userID) { foundIdx = i; break; }
+                                }
+                            }
+                            break;
+                        } else if (midXP > oldXP) {
+                            lo = mid + 1;
+                        } else {
+                            hi = mid - 1;
+                        }
+                    }
+                    if (foundIdx === -1) foundIdx = xpArray.findIndex(x => x.id === userID);
+                    if (foundIdx !== -1) xpArray.splice(foundIdx, 1);
+                }
+            }
+
+            // 2. Insert into new location if newXP > 0
+            if (newXP > 0) {
+                if (newHidden) {
+                    let lo = 0, hi = hiddenMembers.length;
+                    while (lo < hi) {
+                        const mid = (lo + hi) >>> 1;
+                        if (hiddenMembers[mid].xp >= newXP) lo = mid + 1;
+                        else hi = mid;
+                    }
+                    hiddenMembers.splice(lo, 0, { id: userID, xp: newXP });
+                } else {
+                    let lo = 0, hi = xpArray.length;
+                    while (lo < hi) {
+                        const mid = (lo + hi) >>> 1;
+                        if (xpArray[mid].xp >= newXP) lo = mid + 1;
+                        else hi = mid;
+                    }
+                    xpArray.splice(lo, 0, { id: userID, xp: newXP, rank: lo + 1 });
+                }
+            }
+
+            // Mark ranks as needing a fast linear rank-number pass only when getRankings is next read
+            sc.ranksDirty = true;
+            sc.version = cached._version;
+        };
+
         this.applyUpdateToCache = (id, data) => {
             const cached = this.cache.get(id);
             if (!cached || !data || typeof data !== "object") return;
+
+            cached._version = (cached._version || 1) + 1;
+            let canIncrementallyRank = Boolean(cached._sortedCache && !data.$unset);
+            const singleUserChanges = [];
 
             if (data.$unset && typeof data.$unset === "object") {
                 for (const key of Object.keys(data.$unset)) {
@@ -144,33 +219,74 @@ class Model {
             }
 
             if (data.$set && typeof data.$set === "object") {
-                for (const [key, val] of Object.entries(data.$set)) {
+                const entries = Object.entries(data.$set);
+                if (entries.length > 5) canIncrementallyRank = false;
+
+                for (const [key, val] of entries) {
                     if (!isSafePath(key)) continue;
                     if (key === "settings") {
                         cached.settings = this.hydrateSettings(val, cached.info, id).settings;
+                        canIncrementallyRank = false;
                     } else if (key === "users") {
                         cached.users = (val && typeof val === "object" && !Array.isArray(val)) ? val : {};
+                        canIncrementallyRank = false;
                     } else if (key.startsWith("users.")) {
                         const parts = key.split(".");
+                        const uid = parts[1];
+                        const prevUser = (cached.users && cached.users[uid]) || null;
+                        const oldXP = (prevUser && Number.isFinite(prevUser.xp)) ? prevUser.xp : 0;
+                        const oldHidden = Boolean(prevUser && prevUser.hidden);
+
                         if (parts.length === 2 && val && typeof val === "object") {
                             const cleanUser = { xp: Math.max(0, Math.min(1e16 - 1, Math.round(Number(val.xp) || 0))) };
                             if (Number.isFinite(val.cooldown) && val.cooldown > 0) cleanUser.cooldown = Math.round(val.cooldown);
                             if (val.hidden) cleanUser.hidden = true;
                             setByPath(cached, key, cleanUser);
+                            if (canIncrementallyRank) {
+                                singleUserChanges.push({ uid, oldXP, oldHidden, newXP: cleanUser.xp, newHidden: Boolean(cleanUser.hidden) });
+                            }
                         } else if (parts.length === 3 && parts[2] === "xp") {
                             const safeXP = Math.max(0, Math.min(1e16 - 1, Math.round(Number(val) || 0)));
                             setByPath(cached, key, safeXP);
+                            if (canIncrementallyRank) {
+                                singleUserChanges.push({ uid, oldXP, oldHidden, newXP: safeXP, newHidden: oldHidden });
+                            }
+                        } else if (parts.length === 3 && parts[2] === "hidden") {
+                            const newHidden = Boolean(val);
+                            setByPath(cached, key, newHidden);
+                            if (canIncrementallyRank) {
+                                singleUserChanges.push({ uid, oldXP, oldHidden, newXP: oldXP, newHidden });
+                            }
+                        } else if (parts.length === 3 && parts[2] === "cooldown") {
+                            setByPath(cached, key, val);
+                            // Cooldown change does not affect leaderboard rank at all!
+                            if (canIncrementallyRank && cached._sortedCache) {
+                                cached._sortedCache.version = cached._version;
+                            }
                         } else {
                             setByPath(cached, key, val);
+                            canIncrementallyRank = false;
                         }
                     } else {
                         setByPath(cached, key, val);
+                        if (cached._sortedCache && !singleUserChanges.length) {
+                            cached._sortedCache.version = cached._version;
+                        }
                     }
                 }
             }
 
-            cached._version = (cached._version || 1) + 1;
-            cached._sortedCache = null;
+            if (canIncrementallyRank && cached._sortedCache) {
+                for (const chg of singleUserChanges) {
+                    if (chg.oldXP !== chg.newXP || chg.oldHidden !== chg.newHidden) {
+                        this.updateSingleUserRanking(cached, chg.uid, chg.oldXP, chg.oldHidden, chg.newXP, chg.newHidden);
+                    } else {
+                        cached._sortedCache.version = cached._version;
+                    }
+                }
+            } else {
+                cached._sortedCache = null;
+            }
         };
 
         this.loadFull = (id) => {
@@ -216,6 +332,11 @@ class Model {
             const target = this.cache.get(safeId) || doc;
             if (!target) return { xpArray: [], hiddenMembers: [] };
             if (target._sortedCache && target._sortedCache.version === target._version) {
+                if (target._sortedCache.ranksDirty) {
+                    const arr = target._sortedCache.xpArray;
+                    for (let i = 0; i < arr.length; i++) arr[i].rank = i + 1;
+                    target._sortedCache.ranksDirty = false;
+                }
                 return target._sortedCache;
             }
             const xpArray = [];
@@ -234,9 +355,27 @@ class Model {
             }
             if (hiddenMembers.length) hiddenMembers.sort((a, b) => b.xp - a.xp);
 
-            const result = { version: target._version || 1, xpArray, hiddenMembers };
+            const result = { version: target._version || 1, xpArray, hiddenMembers, ranksDirty: false };
             if (this.cache.has(safeId)) this.cache.get(safeId)._sortedCache = result;
             return result;
+        };
+
+        // Fast zero-clone read path for high-frequency commands (e.g. messageCreate, /rank, /sync)
+        this.fetchSettings = (id, userID) => {
+            const safeId = String(id || "");
+            if (!safeId) return Promise.resolve(null);
+            if (this.cache.has(safeId)) {
+                const doc = this.cache.get(safeId);
+                return Promise.resolve({
+                    _id: doc._id,
+                    settings: doc.settings,
+                    info: doc.info,
+                    users: doc.users || {}
+                });
+            }
+            const filter = userID ? ["settings", `users.${userID}`] : ["settings"];
+            this.loadFull(safeId).catch(() => null);
+            return this.model.findById(safeId, filter).maxTimeMS(10000).lean().then(raw => this.hydrateDoc(raw));
         };
 
         this.fetch = (id, filter, options) => {
@@ -258,6 +397,55 @@ class Model {
             return this.loadFull(id).then(doc => this.cloneDoc(doc));
         };
 
+        // Flush any buffered high-frequency XP updates to MongoDB Atlas in a single atomic updateOne per server
+        this.flushDirty = async () => {
+            if (!this.dirtyBuffer.size) return;
+            const entries = Array.from(this.dirtyBuffer.entries());
+            this.dirtyBuffer.clear();
+            await Promise.all(entries.map(([guildId, setMap]) => {
+                const $set = Object.fromEntries(setMap);
+                return this.model.updateOne({ _id: guildId }, { $set }).catch(e => console.warn("DB flush error:", e.message));
+            }));
+        };
+
+        // Queue a high-frequency XP gain update: updates RAM cache & rankings immediately (0ms)
+        // and coalesces MongoDB Atlas writes every 2.5 seconds (100% identical schema in MongoDB!)
+        this.queueUserUpdate = (id, userID, userData) => {
+            const safeId = String(id || "");
+            const safeUser = String(userID || "");
+            if (!safeId || !/^\d{10,30}$/.test(safeUser) || !userData || typeof userData !== "object") return;
+
+            const cleanUser = { xp: Math.max(0, Math.min(1e16 - 1, Math.round(Number(userData.xp) || 0))) };
+            if (Number.isFinite(userData.cooldown) && userData.cooldown > 0) cleanUser.cooldown = Math.round(userData.cooldown);
+            if (userData.hidden) cleanUser.hidden = true;
+
+            const payload = { $set: { [`users.${safeUser}`]: cleanUser } };
+            if (this.cache.has(safeId)) {
+                this.applyUpdateToCache(safeId, payload);
+            } else if (this.inflight.has(safeId)) {
+                if (!this.pendingUpdates.has(safeId)) this.pendingUpdates.set(safeId, []);
+                this.pendingUpdates.get(safeId).push(payload);
+            }
+
+            if (!this.dirtyBuffer.has(safeId)) this.dirtyBuffer.set(safeId, new Map());
+            this.dirtyBuffer.get(safeId).set(`users.${safeUser}`, cleanUser);
+
+            if (!this.flushTimer) {
+                this.flushTimer = setTimeout(() => {
+                    this.flushTimer = null;
+                    this.flushDirty();
+                }, 2500);
+                if (this.flushTimer.unref) this.flushTimer.unref();
+            }
+        };
+
+        if (this.isServerModel) {
+            const flushOnExit = () => { this.flushDirty().catch(() => {}); };
+            process.once("SIGTERM", flushOnExit);
+            process.once("SIGINT", flushOnExit);
+            process.once("beforeExit", flushOnExit);
+        }
+
         this.update = (id, data, options) => {
             const safeId = String(id || "");
             const sanitized = this.isServerModel ? sanitizeUpdatePayload(data) : data;
@@ -267,6 +455,22 @@ class Model {
                 } else if (this.inflight.has(safeId)) {
                     if (!this.pendingUpdates.has(safeId)) this.pendingUpdates.set(safeId, []);
                     this.pendingUpdates.get(safeId).push(sanitized);
+                }
+                // Keep dirtyBuffer coherent if an explicit update modifies a buffered path
+                if (this.dirtyBuffer.has(safeId)) {
+                    const buf = this.dirtyBuffer.get(safeId);
+                    if (sanitized.$unset) {
+                        for (const k of Object.keys(sanitized.$unset)) {
+                            if (k === "users") buf.clear();
+                            else buf.delete(k);
+                        }
+                    }
+                    if (sanitized.$set) {
+                        for (const k of Object.keys(sanitized.$set)) {
+                            if (k === "users") buf.clear();
+                            else buf.delete(k);
+                        }
+                    }
                 }
             }
             return this.model.updateOne({ _id: safeId }, sanitized || data, options);
@@ -322,6 +526,7 @@ class Model {
         this.delete = (query, options) => {
             if (this.isServerModel && query && typeof query._id === "string") {
                 this.cache.delete(query._id);
+                this.dirtyBuffer.delete(query._id);
             }
             return this.model.deleteMany(query, options);
         };

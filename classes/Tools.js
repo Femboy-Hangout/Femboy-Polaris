@@ -41,9 +41,11 @@ class Tools {
             notMod: "You don't have permission to use this command!"
         }
 
-        // fetch settings from db/cache (+ some xp)
+        // fetch settings from db/cache (+ some xp) without deep-cloning settings on every message
         this.fetchSettings = async function(userID, serverID=int.guild.id) {
-            let data = await client.db.fetch(serverID, ["settings", userID ? `users.${userID}` : null])
+            let data = client.db.fetchSettings
+                ? await client.db.fetchSettings(serverID, userID)
+                : await client.db.fetch(serverID, ["settings", userID ? `users.${userID}` : null])
             if (!data) {
                 await client.db.create({ _id: serverID })
                 return await this.fetchSettings(userID, serverID)
@@ -60,24 +62,35 @@ class Tools {
             })
         }
 
-        // calculates current level from xp
+        // calculates current level from xp using O(log maxLevel) binary search (max 10 steps instead of 1000)
         this.getLevel = function(xp, settings, returnRequirement) {
-            let lvl = 0
-            let previousLevel = 0
-            let xpRequired = 0                
-            while (xp >= xpRequired && lvl <= settings.maxLevel) {  // cubic formula my ass, here's a while loop. could probably binary search this?
-                lvl++
-                previousLevel = xpRequired
-                xpRequired = this.xpForLevel(lvl, settings)
+            let maxLvl = settings.maxLevel || 1000
+            if (xp <= 0) {
+                return returnRequirement ? { level: 0, xpRequired: this.xpForLevel(1, settings), previousLevel: 0 } : 0
             }
-            lvl--
-            return returnRequirement ? { level: lvl, xpRequired, previousLevel } : lvl
+            let maxReq = this.xpForLevel(maxLvl, settings)
+            if (xp >= maxReq) {
+                return returnRequirement ? { level: maxLvl, xpRequired: maxReq, previousLevel: maxReq } : maxLvl
+            }
+            let lo = 0, hi = maxLvl
+            while (lo < hi) {
+                let mid = (lo + hi + 1) >>> 1
+                if (xp >= this.xpForLevel(mid, settings)) lo = mid
+                else hi = mid - 1
+            }
+            return returnRequirement
+                ? { level: lo, xpRequired: this.xpForLevel(lo + 1, settings), previousLevel: lo > 0 ? this.xpForLevel(lo, settings) : 0 }
+                : lo
         }
 
         // calculate xp to reach a level
         this.xpForLevel = function(lvl, settings) {
+            if (lvl <= 0) return 0
             if (lvl > settings.maxLevel) lvl = settings.maxLevel
-            let xpRequired = Object.entries(settings.curve).reduce((total, n) => total + (n[1] * (lvl ** n[0])), 0)
+            let c1 = Number(settings.curve[1]) || 0
+            let c2 = Number(settings.curve[2]) || 0
+            let c3 = Number(settings.curve[3]) || 0
+            let xpRequired = (c1 * lvl) + (c2 * lvl * lvl) + (c3 * lvl * lvl * lvl)
             return settings.rounding > 1 ? settings.rounding * Math.round(xpRequired / settings.rounding) : Math.round(xpRequired)
         }
 

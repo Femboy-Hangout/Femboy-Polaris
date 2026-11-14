@@ -111,8 +111,17 @@ function canManageServer(guild) {
     return !!(guild.owner || hasPerm(guild.permissions, manage_server) || hasPerm(guild.permissions, server_admin))
 }
 
+let cachedBotPublic = null
+let cachedBotPublicExpires = 0
 function botIsPublic() {
-    return client.application.fetch().then(x => x.botPublic)
+    if (cachedBotPublic !== null && Date.now() < cachedBotPublicExpires) {
+        return Promise.resolve(cachedBotPublic)
+    }
+    return client.application.fetch().then(x => {
+        cachedBotPublic = !!x.botPublic
+        cachedBotPublicExpires = Date.now() + 600000 // cache for 10 minutes
+        return cachedBotPublic
+    }).catch(() => cachedBotPublic ?? true)
 }
 
 function notFalse(val) {

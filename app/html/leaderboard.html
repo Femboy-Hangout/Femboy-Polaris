@@ -276,22 +276,34 @@ function commafy(num) {
 }
 
 function getLevel(xp, settings) {
-    let lvl = 0
-    let previousLevel = 0
-    let xpRequired = 0                
-    while (xp >= xpRequired && lvl <= settings.maxLevel) {  // cubic formula my ass, here's a while loop
-        lvl++
-        previousLevel = xpRequired
-        xpRequired = this.xpForLevel(lvl, settings)
+    let maxLvl = settings.maxLevel || 1000
+    if (xp <= 0) {
+        let req1 = xpForLevel(1, settings)
+        return { level: 0, xpRequired: req1, previousLevel: 0, percentage: 0 }
     }
-    lvl--
-    let percentage = lvl >= settings.maxLevel ? 100 : (xp - previousLevel) / (xpRequired - previousLevel) * 100
-    return { level: lvl, xpRequired, previousLevel, percentage }
+    let maxReq = xpForLevel(maxLvl, settings)
+    if (xp >= maxReq) {
+        return { level: maxLvl, xpRequired: maxReq, previousLevel: maxReq, percentage: 100 }
+    }
+    let lo = 0, hi = maxLvl
+    while (lo < hi) {
+        let mid = (lo + hi + 1) >>> 1
+        if (xp >= xpForLevel(mid, settings)) lo = mid
+        else hi = mid - 1
+    }
+    let previousLevel = lo > 0 ? xpForLevel(lo, settings) : 0
+    let xpRequired = xpForLevel(lo + 1, settings)
+    let percentage = (xp - previousLevel) / (xpRequired - previousLevel) * 100
+    return { level: lo, xpRequired, previousLevel, percentage }
 }
 
 function xpForLevel(lvl, settings) {
+    if (lvl <= 0) return 0
     if (lvl > settings.maxLevel) lvl = settings.maxLevel
-    let xpRequired = Object.entries(settings.curve).reduce((total, n) => total + (n[1] * (lvl ** n[0])), 0)
+    let c1 = Number(settings.curve[1]) || 0
+    let c2 = Number(settings.curve[2]) || 0
+    let c3 = Number(settings.curve[3]) || 0
+    let xpRequired = (c1 * lvl) + (c2 * lvl * lvl) + (c3 * lvl * lvl * lvl)
     return settings.rounding > 1 ? settings.rounding * Math.round(xpRequired / settings.rounding) : xpRequired
 }
 

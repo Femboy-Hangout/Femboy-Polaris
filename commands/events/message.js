@@ -15,8 +15,9 @@ async run(client, message, tools) {
     let settings = db.settings
 
     // fetch user's xp, or give them 0
-    let userData = db.users[author] || { xp: 0, cooldown: 0 }
-    if (userData.cooldown > Date.now()) return // on cooldown, stop here
+    let existing = db.users[author]
+    if (existing && existing.cooldown > Date.now()) return // on cooldown, stop here
+    let userData = existing ? { xp: existing.xp || 0, cooldown: existing.cooldown || 0, hidden: existing.hidden } : { xp: 0, cooldown: 0 }
 
     // check role+channel multipliers, exit if 0x
     let multiplierData = tools.getMultiplier(message.member, settings, message.channel)
@@ -36,8 +37,9 @@ async run(client, message, tools) {
     // if hidden from leaderboard, unhide since they're no longer inactive
     if (userData.hidden) userData.hidden = false
 
-    // database update
-    client.db.update(message.guild.id, { $set: { [`users.${author}`]: userData } }).exec();
+    // database update (updates cache & rankings in 0ms and coalesces MongoDB Atlas writes every 2.5s)
+    if (client.db.queueUserUpdate) client.db.queueUserUpdate(message.guild.id, author, userData)
+    else client.db.update(message.guild.id, { $set: { [`users.${author}`]: userData } }).exec();
 
     // check for level up
     let oldLevel = tools.getLevel(oldXP, settings)
