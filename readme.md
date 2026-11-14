@@ -1,5 +1,5 @@
 # Femboy Polaris!
-...is a performance-optimized, security-hardened fork of **Polaris** (originally created by [Colon](https://gdcolon.com)), a super customizable XP bot for Discord!
+...is a performance-optimized, security-hardened fork of **Polaris** — maintained by **[Femboy Hangout](https://discord.gg/femboyhangout)** and originally created by **[Colon](https://gdcolon.com)**, a super customizable XP bot for Discord!
 
 ### What's New in Femboy Polaris
 - **High-Performance Database & Leaderboard Caching (`DatabaseModel.js`):**

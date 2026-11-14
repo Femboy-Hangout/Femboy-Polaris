@@ -16,6 +16,7 @@ async run(client, int, tools) {
     let totalServers = stats.reduce((a, b) => a + b.guilds, 0)
 
     let botStatus = [
+        `**Maintainer:** **[Femboy Hangout](https://discord.gg/femboyhangout)** 🌸`,
         `**Original creator:** **[Colon](https://gdcolon.com)** 🦊⛩️`,
         `**Version:** v${versionNumber} - updated <t:${Math.round(client.version.updated / 1000)}:R>`,
         `**Shard:** ${client.shard.id}/${client.shard.count - 1}`,
