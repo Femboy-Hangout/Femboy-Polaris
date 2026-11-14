@@ -24,8 +24,8 @@ async run(client, int, tools) {
     let pageSize = 10
 
     let minLeaderboardXP = db.settings.leaderboard.minLevel > 1 ? tools.xpForLevel(db.settings.leaderboard.minLevel, db.settings) : 0
-    let rankings = tools.xpObjToArray(db.users)
-    rankings = rankings.filter(x => x.xp > minLeaderboardXP && !x.hidden).sort(function(a, b) {return b.xp - a.xp})
+    let rankings = client.db.getRankings ? client.db.getRankings(int.guild.id, db).xpArray : tools.xpObjToArray(db.users).filter(x => !x.hidden).sort((a, b) => b.xp - a.xp)
+    if (minLeaderboardXP > 0) rankings = rankings.filter(x => x.xp > minLeaderboardXP)
 
     if (db.settings.leaderboard.maxEntries > 0) rankings = rankings.slice(0, db.settings.leaderboard.maxEntries)
 

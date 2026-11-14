@@ -6,7 +6,7 @@
     <link rel="icon" href="/assets/polaris.svg">
     <title>Leaderboard</title>
 
-    <meta property="og:title" content="Polaris">
+    <meta property="og:title" content="Femboy Polaris">
     <meta property="og:description" content="An open-source XP bot">
     <meta property="og:type" content="website">
     <meta name="theme-color" content="#00ff80">
@@ -307,7 +307,7 @@ this.getMultiplier = function(roles=[], settings, roleList) {
                 foundBoosts = roleBoosts.sort((a, b) => a.boost - b.boost)[0]; break;
             case "highest": // highest role
                 let foundTopBoost = roleList.find(x => roleBoosts.find(y => y.id == x.id))
-                foundBoosts = roleBoosts.find(x => x.id == foundTopBoost.id); break;
+                foundBoosts = foundTopBoost ? roleBoosts.find(x => x.id == foundTopBoost.id) : roleBoosts[0]; break;
             case "combine": // multiply all, holy shit
                 foundBoosts = roleBoosts; break;
             case "add": // add (n-1) from each
@@ -315,7 +315,8 @@ this.getMultiplier = function(roles=[], settings, roleList) {
             default: // largest boost 
                 foundBoosts = roleBoosts.sort((a, b) => b.boost - a.boost)[0]; break;
         }
-        if (!Array.isArray(foundBoosts)) foundBoosts = [foundBoosts]
+        if (!Array.isArray(foundBoosts)) foundBoosts = foundBoosts ? [foundBoosts] : []
+        if (!foundBoosts.length) return { roles: [], boost: 1 }
 
         if (settings.multipliers.rolePriority == "combine") {
             let combined = foundBoosts.map(x => x.boost).reduce((a, b) => a * b, 1).toFixed(4) 
@@ -416,8 +417,8 @@ Fetch(`/api/leaderboard/${guildID}`).then(data => {
                 mult.show()
                 if (multiplier.roles.length == 1) {
                     let foundRole = data.roles.find(x => x.id == multiplier.roles[0].id)
-                    multText = foundRole.name
-                    if (foundRole.color != "#000000") mult.css("color", foundRole.color)
+                    multText = foundRole ? foundRole.name : "1 role"
+                    if (foundRole && foundRole.color != "#000000") mult.css("color", foundRole.color)
                 }
 
                 else { // multiple roles
@@ -456,6 +457,7 @@ Fetch(`/api/leaderboard/${guildID}`).then(data => {
     data.settings.rewards.sort((a, b) => a.level - b.level).forEach(r => {
         let rSlot = roleSlot.clone()
         let role = data.roles.find(x => r.id == x.id)
+        if (!role) return
         let roleXP = xpForLevel(r.level, data.settings)
         let roleProgress = (!loggedIn || !data.user.id) ? 0 : data.user.xp / roleXP * 100
         let roleColor = roleCol(role.color)
@@ -532,7 +534,7 @@ Fetch(`/api/leaderboard/${guildID}`).then(data => {
         if (userMultiplier.roles.length) {
             if (userMultiplier.roles.length == 1) {
                 let foundMultiplier = data.roles.find(x => x.id == userMultiplier.roles[0].id)
-                $('#accountInfo [lb=multiplier]').text(`${foundMultiplier.name} (${userMultiplier.boost}x XP)`).css("color", roleCol(foundMultiplier.color))
+                $('#accountInfo [lb=multiplier]').text(`${foundMultiplier ? foundMultiplier.name : "1 role"} (${userMultiplier.boost}x XP)`).css("color", roleCol((foundMultiplier || {}).color))
             }
             else $('#accountInfo [lb=multiplier]').text(`${userMultiplier.roles.length} roles (${userMultiplier.boost}x XP)`)
         }

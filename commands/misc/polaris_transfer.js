@@ -21,24 +21,27 @@ module.exports = {
         let importedUsers = 0
 
         let transferData = await client.db.fetch(transferFrom, toTransfer)
-        if (!transferData) return { error: `No Polaris data found for ${foundServer.name}`, code: "invalidImport" }
+        if (!transferData) return { error: `No Femboy Polaris data found for ${foundServer.name}`, code: "invalidImport" }
 
         let newData = {}
 
-        if (importSettings.xp) {
+        if (importSettings.xp && transferData.users && typeof transferData.users === "object") {
             let now = Date.now();
             Object.entries(transferData.users).forEach(u => {
+                const [id, val] = u
+                if (!/^\d{16,20}$/.test(id) || !val || !Number.isFinite(Number(val.xp))) return
                 importedUsers++
-                let xpVal = { xp: u[1].xp }
-                if (u[1].cooldown && u[1].cooldown > now) xpVal.cooldown = u[1].cooldown
-                newData[`users.${u[0]}`] = xpVal
+                let xpVal = { xp: tools.clamp(Math.round(Number(val.xp)), 0, 1e16 - 1) }
+                if (Number.isFinite(val.cooldown) && val.cooldown > now) xpVal.cooldown = Math.round(val.cooldown)
+                newData[`users.${id}`] = xpVal
             })
             details.push(`${tools.commafy(importedUsers)} user${importedUsers == 1 ? "" : "s"}`)
         }
 
-        if (importSettings.settings) {
-            let currentSettings = await client.db.fetch(serverID, "settings").then(x => x.settings)
-            let transferSettings = transferData.settings
+        if (importSettings.settings && transferData.settings) {
+            let currentDoc = await client.db.fetch(serverID, "settings") || await client.db.create({ _id: serverID })
+            let currentSettings = currentDoc.settings
+            let transferSettings = structuredClone(transferData.settings)
             transferSettings.rewards = currentSettings.rewards
             transferSettings.multipliers.roles = currentSettings.multipliers.roles
             transferSettings.multipliers.channels = currentSettings.multipliers.channels

@@ -1,10 +1,22 @@
-# Polaris!
-...is a super customizable XP bot for Discord with all sorts of neat features!
-Unfortunately, it's become increasingly annoying to host, so I'm passing the torch by open-sourcing all the messy code and allowing anyone to host this thing!
+# Femboy Polaris!
+...is a performance-optimized, security-hardened fork of **Polaris** (originally created by [Colon](https://gdcolon.com)), a super customizable XP bot for Discord!
 
-If you're an experienced software dev i am so sorry for what comes next
+### What's New in Femboy Polaris
+- **High-Performance Database & Leaderboard Caching (`DatabaseModel.js`):**
+  - Uses `.lean()` MongoDB queries and in-memory server document caching to eliminate multi-megabyte BSON hydration timeouts on large servers.
+  - Preloads guild database documents on startup (`index.js`) and maintains a versioned in-memory leaderboard ranking cache (`getRankings`) for instant `/top` and web leaderboard responses.
+  - Batches Discord member lookups with a 5-minute missing-member TTL cache so members who left the server don't trigger repeated gateway fetches.
+- **MongoDB Atlas Data Integrity & Security Hardening:**
+  - Atomic member pruning via `$unset` (prevents overwriting concurrent XP gains).
+  - Prototype pollution (`__proto__`, `constructor`, `prototype`) and NoSQL operator injection (`$`) guards on all database updates and JSON imports.
+  - Strict Snowflake ID validation and `NaN`/`Infinity` clamping across all API routes.
+  - Cryptographically secure 256-bit `HttpOnly`/`SameSite=Lax` session cookies, stored XSS escaping in the web dashboard, and upgraded Node 20 (`node:20-bookworm`) + patched Express/Mongoose/discord.js dependencies.
+- **Cloudflare & Nginx Proxy Manager Ready:**
+  - Configured with `trust proxy`, `CF-Connecting-IP` per-IP rate limiting, edge `Cache-Control` headers for static assets, and `no-store` headers for dynamic API/OAuth routes.
 
-## How do I host it?
+---
+
+## Original Polaris Hosting Guide (by Colon)
 It's ""easy!""
 
 ### Step 0: Node.js

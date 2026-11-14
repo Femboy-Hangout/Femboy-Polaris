@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <link href="/css/polaris.css" type="text/css" rel="stylesheet">
     <link rel="icon" href="/assets/polaris.svg">
-    <title>Polaris</title>
-    <meta property="og:title" content="Polaris">
+    <title>Femboy Polaris</title>
+    <meta property="og:title" content="Femboy Polaris">
     <meta property="og:description" content="An open-source XP bot">
     <meta property="og:type" content="website">
     <meta name="theme-color" content="#00ff80">
@@ -108,8 +108,8 @@ Fetch(`./api/guilds`).then(data => {
     })
 
     $('.serverOption').click(function(e) {
-        if (e.target.nodeName != "A") {
-            let foundHref =  $(this).find("a:visible").last()
+        if (!$(e.target).closest('a').length) {
+            let foundHref = $(this).find("a:visible").last()
             if (foundHref.attr("href")) window.location.href = foundHref.attr("href")
             else foundHref.click()
         }
@@ -142,7 +142,7 @@ Fetch(`./api/guilds`).then(data => {
 
 let downloading = false
 function downloadServerData(server) {
-    if (!server || !confirm(`Would you like to download all Polaris data from ${server.name}? (it can be imported into other bots)`)) return
+    if (!server || !confirm(`Would you like to download all Femboy Polaris data from ${server.name}? (it can be imported into other bots)`)) return
 
     fetch(`./api/xp/${server.id}?format=everything`).then(res => {
         if (!res.ok) {

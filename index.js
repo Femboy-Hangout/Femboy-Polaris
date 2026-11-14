@@ -62,6 +62,9 @@ client.on("ready", () => {
     client.startupTime = Date.now() - startTime
     client.version = version
 
+    // Preload server data into memory cache in the background
+    if (client.db.preload) client.db.preload([...client.guilds.cache.keys()])
+
     client.application.commands.fetch() // cache slash commands
     .then(cmds => {
         if (cmds.size < 1) { // no commands!! deploy to test server

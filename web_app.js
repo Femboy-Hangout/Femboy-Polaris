@@ -23,10 +23,48 @@ module.exports = (client) => {
 const app = express();
 const tools = Tools.global
 
+app.disable('x-powered-by');
+app.set('trust proxy', true); // trust Cloudflare + Nginx Proxy Manager X-Forwarded-* headers
 app.use(cookieParser());
 app.use(express.json({ limit: '20mb' }));  // keeping the limit pretty high for json imports, some servers are like 10+ megabytes
-app.use(timeout('20s'));
+app.use(timeout('60s'));
 app.set('json spaces', 2)
+
+// Lightweight per-IP rate limiter (uses cf-connecting-ip when behind Cloudflare)
+const rateBuckets = new Map();
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, b] of rateBuckets) {
+        if (b.resetAt <= now) rateBuckets.delete(key);
+    }
+}, 60000).unref();
+
+app.use(function(req, res, next) {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "SAMEORIGIN");
+    res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+
+    if (req.path.startsWith("/api/") || req.path === "/auth" || req.path === "/logout") {
+        // Never let Cloudflare or browsers cache dynamic API/auth responses
+        res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+
+        const clientIP = req.headers["cf-connecting-ip"] || req.ip || "unknown";
+        const isWrite = req.method === "POST";
+        const limit = isWrite ? 30 : 120; // 30 POSTs or 120 GETs per minute per IP
+        const bucketKey = `${clientIP}:${isWrite ? "W" : "R"}`;
+        const now = Date.now();
+        let bucket = rateBuckets.get(bucketKey);
+        if (!bucket || bucket.resetAt <= now) {
+            bucket = { count: 0, resetAt: now + 60000 };
+            rateBuckets.set(bucketKey, bucket);
+        }
+        bucket.count++;
+        if (bucket.count > limit) {
+            return res.status(429).send({ apiError: true, message: "Too many requests! Please slow down." });
+        }
+    }
+    next();
+});
 
 require('express-async-errors') // why is this NEEDED (actually malding)
 
@@ -89,9 +127,9 @@ function clearDeletedData(settings, roles, channels) {
     return settings
 }
 
-app.use("/assets", express.static(__dirname + '/app/assets'));
-app.use("/css", express.static(__dirname + '/app/css'));
-app.use("/polaris.js", express.static(__dirname + '/app/js/extras.js'));
+app.use("/assets", express.static(__dirname + '/app/assets', { maxAge: '7d' }));
+app.use("/css", express.static(__dirname + '/app/css', { maxAge: '1d' }));
+app.use("/polaris.js", express.static(__dirname + '/app/js/extras.js', { maxAge: '1d' }));
 
 app.use(function(req, res, next) {
     res.apiError = function(message, code) {
@@ -169,8 +207,8 @@ app.get("/api/guilds", async function(req, res) {
 app.get("/api/settings/:id", async function(req, res) {
     let [user, guilds] = await getDiscordInfo(req)
     if (!user || !guilds) return res.apiError("Not logged in!", "login")
-    let serverID = req.params.id
-    if (!serverID) return res.apiError("Invalid server ID!")
+    let serverID = String(req.params.id || "")
+    if (!/^\d{10,30}$/.test(serverID)) return res.apiError("Invalid server ID!")
 
     // this allows devs to view and modify ANY SERVER
     // it's actually new to the open source version, previously i hacked together some other thing
@@ -244,7 +282,9 @@ app.get("/api/settings/:id", async function(req, res) {
 
     let lvlMessage = serverData.settings.levelUp.message
     if (serverData.settings.levelUp.embed && lvlMessage) {
-        serverData.settings.levelUp.message = JSON.stringify(JSON.parse(lvlMessage), null, 2)
+        try {
+            serverData.settings.levelUp.message = JSON.stringify(JSON.parse(lvlMessage), null, 2)
+        } catch (e) {}
     }
 
     let ownedServers = guilds.filter(x => x.owner && x.id != serverID).map(x => ({ name: x.name, id: x.id }))
@@ -255,13 +295,13 @@ app.get("/api/settings/:id", async function(req, res) {
 function validateSetting(val, setting, guildData={}) {
     switch (setting.type) {
         case "bool":
-            return notFalse(val)
+            return !!notFalse(val)
         case "int": case "float":
             let numVal = setting.type == "int" ? Math.round(val) : Number(Number(val).toFixed(setting.precision || 4))
-            if (isNaN(numVal)) return setting.default
+            if (!Number.isFinite(numVal)) return setting.default
             else return tools.clamp(numVal, setting.min, setting.max)
         case "string":
-            let strVal = String(val).slice(0, setting.maxlength || 64).trim()
+            let strVal = String(val ?? "").slice(0, setting.maxlength || 64).trim()
             if (setting.accept) {
                 let acceptList = setting.accept.filter(x => !x.startsWith("discord:"))
                 if (setting.accept.includes("discord:role")) acceptList = acceptList.concat(guildData.roles)
@@ -273,7 +313,8 @@ function validateSetting(val, setting, guildData={}) {
         case "collection":
             let collection = []
             if (!val || !Array.isArray(val)) return []
-            val.forEach(x => {
+            val.slice(0, 500).forEach(x => {
+                if (!x || typeof x !== "object") return
                 let validated = {}
                 Object.entries(x).forEach(s => {
                     let [innerKey, innerVal] = s
@@ -288,9 +329,9 @@ function validateSetting(val, setting, guildData={}) {
 
 app.post("/api/settings", async function(req, res) {
     
-    if (typeof req.body != "object") return res.apiError("Invalid save data!");
-    let guildID = req.body.guildID
-    if (!guildID) return res.apiError("No guild ID!");
+    if (!req.body || typeof req.body != "object") return res.apiError("Invalid save data!");
+    let guildID = String(req.body.guildID || "")
+    if (!/^\d{10,30}$/.test(guildID)) return res.apiError("No guild ID!");
 
     let [user, guilds] = await getDiscordInfo(req)
     if (!user || !guilds) return res.apiError("Not logged in!")
@@ -348,13 +389,13 @@ app.post("/api/settings", async function(req, res) {
     // prevent min > max
     let xpMin = dbObj["settings.gain.min"]
     let xpMax = dbObj["settings.gain.max"]
-    if (xpMin > xpMax) {
+    if (xpMin !== undefined && xpMax !== undefined && xpMin > xpMax) {
         dbObj["settings.gain.min"] = xpMax
         dbObj["settings.gain.max"] = xpMin
     }
 
     // prevent 0 curve
-    if (dbObj["settings.curve.3"] == 0 && dbObj["settings.curve.2"] == 0 && dbObj["settings.curve.1"] == 0) dbObj["settings.curve.1"] = 1
+    if (dbObj["settings.curve.3"] === 0 && dbObj["settings.curve.2"] === 0 && dbObj["settings.curve.1"] === 0) dbObj["settings.curve.1"] = 1
 
     dbObj['info.lastUpdate'] = Date.now()
 
@@ -365,11 +406,11 @@ app.post("/api/settings", async function(req, res) {
 })
 
 app.post("/api/sendexample", async function(req, res) {
-    if (typeof req.body != "object") return res.apiError("Invalid data!");
-    if (!req.body.message) return res.apiError("No message!")
+    if (!req.body || typeof req.body != "object") return res.apiError("Invalid data!");
+    if (!req.body.message || typeof req.body.message !== "string") return res.apiError("No message!")
 
-    let guildID = req.body.guildID
-    if (!guildID) return res.apiError("No guild ID!");
+    let guildID = String(req.body.guildID || "")
+    if (!/^\d{10,30}$/.test(guildID)) return res.apiError("No guild ID!");
 
     let [user, guilds] = await getDiscordInfo(req)
     if (!user || !guilds) return res.apiError("Not logged in!")
@@ -451,13 +492,13 @@ app.post("/api/sendexample", async function(req, res) {
 })
 
 app.post("/api/pruneMembers", async function(req, res) {
-    if (typeof req.body != "object") return res.apiError("Invalid data!");
+    if (!req.body || typeof req.body != "object") return res.apiError("Invalid data!");
     let num = Number(req.body.amount)
 
-    if (!num || num <= 0) return res.apiError("No amount!")
+    if (!Number.isFinite(num) || num <= 0) return res.apiError("No amount!")
 
-    let guildID = req.body.guildID
-    if (!guildID) return res.apiError("No guild ID!");
+    let guildID = String(req.body.guildID || "")
+    if (!/^\d{10,30}$/.test(guildID)) return res.apiError("No guild ID!");
 
     let [user, guilds] = await getDiscordInfo(req)
     if (!user || !guilds) return res.apiError("Not logged in!")
@@ -468,20 +509,23 @@ app.post("/api/pruneMembers", async function(req, res) {
     let canManage = canManageServer(foundGuild)
     if (!canManage) return res.apiError("Manage server permission required!")
 
-    let users = await client.db.fetch(guildID, ["users"]).then(x => x.users)
-    let vals = Object.entries(users || {})
-    let toPrune = vals.filter(x => (x[1].xp || 0) < num).length
+    let doc = await client.db.fetch(guildID, ["users"])
+    let users = doc?.users || {}
+    let vals = Object.entries(users)
+    let toPruneEntries = vals.filter(x => (x[1]?.xp || 0) < num)
+    let toPrune = toPruneEntries.length
 
     if (req.body.confirmPrune != "hell yes") {
         return res.send({ total: vals.length, matches: toPrune })
     }
 
     else {
-        let newUsers = {}
-        vals.forEach(x => {
-            if ((x[1].xp || 0) >= num) newUsers[x[0]] = x[1]
+        if (toPrune === 0) return res.end("Successfully pruned 0 users!")
+        let unsetObj = {}
+        toPruneEntries.forEach(x => {
+            if (/^\d{10,30}$/.test(x[0])) unsetObj[`users.${x[0]}`] = ""
         })
-        client.db.update(guildID, { $set: { users: newUsers } }).exec().then(() => {
+        client.db.update(guildID, { $unset: unsetObj }).exec().then(() => {
             return res.end(`Successfully pruned ${toPrune} user${toPrune == 1 ? "" : "s"}!`)
         }).catch(console.error)
     }
@@ -494,10 +538,10 @@ app.post("/api/importfrombot", async function(req, res) {
     req.clearTimeout()
     req.setTimeout(60000)
     
-    if (typeof req.body != "object" || !req.body.import || typeof req.body.import != "object") return res.apiError("Invalid data!");
+    if (!req.body || typeof req.body != "object" || !req.body.import || typeof req.body.import != "object") return res.apiError("Invalid data!");
 
-    let guildID = req.body.guildID
-    if (!guildID) return res.apiError("No guild ID!");
+    let guildID = String(req.body.guildID || "")
+    if (!/^\d{10,30}$/.test(guildID)) return res.apiError("No guild ID!");
 
     let [user, guilds] = await getDiscordInfo(req)
     if (!user || !guilds) return res.apiError("Not logged in!")
@@ -548,7 +592,8 @@ app.post("/api/importfrombot", async function(req, res) {
 })
 
 app.get("/api/leaderboard/:id", cors(), async function(req, res) {
-    let guildID = req.params.id
+    let guildID = String(req.params.id || "")
+    if (!/^\d{10,30}$/.test(guildID)) return res.apiError("Invalid server!", "invalidServer");
 
     let data = await client.db.fetch(guildID)
     if (!data) return res.apiError("Invalid server!", "invalidServer");
@@ -556,7 +601,7 @@ app.get("/api/leaderboard/:id", cors(), async function(req, res) {
     let settings = data.settings
     if (!settings.enabled) return res.apiError("XP is disabled in this server!", "xpDisabled")
 
-    let singleUser = (req.query.user && req.query.user.match(/^\d{10,30}$/) ? req.query.user : null)
+    let singleUser = (req.query.user && String(req.query.user).match(/^\d{10,30}$/) ? String(req.query.user) : null)
 
     let [userInfo, guildInfo] = singleUser ? [null, null] : await getDiscordInfo(req)
     let loggedIn = userInfo && guildInfo && userInfo.id
@@ -575,29 +620,37 @@ app.get("/api/leaderboard/:id", cors(), async function(req, res) {
     let rewardList = settings.leaderboard.hideRoles ? [] : settings.rewards.filter(x => x.level <= settings.maxLevel)
     let importantRoles = settings.multipliers.roles.concat(rewardList).map(x => x.id)
     
-    // convert xp object to array (+ remove useless info like cooldowns)
+    // use cached sorted rankings from DatabaseModel
+    let rankingsData = client.db.getRankings ? client.db.getRankings(guildID, data) : null
     let xpArray = []
     let hiddenMembers = []
 
-    Object.entries(data.users || {}).forEach(x => {
-        if (!x || !x[0] || !x[1].xp || x[1].xp <= 0) return
-        let isHidden = x[1].hidden
-        if (!isHidden) xpArray.push(x)
-        else if (isMod || isDev) hiddenMembers.push({ id: x[0], xp: x[1].xp })
-    })
-
-    xpArray = xpArray.sort((a, b) => b[1].xp - a[1].xp)
-    .map((x, y) => ({ id: x[0], xp: x[1].xp, rank: y+1 })) 
-
-    if (hiddenMembers.length) hiddenMembers = hiddenMembers.sort((a, b) => b.xp - a.xp)
+    if (rankingsData) {
+        xpArray = rankingsData.xpArray
+        if (isMod || isDev) hiddenMembers = rankingsData.hiddenMembers
+    } else {
+        Object.entries(data.users || {}).forEach(x => {
+            if (!x || !x[0] || !x[1].xp || x[1].xp <= 0) return
+            let isHidden = x[1].hidden
+            if (!isHidden) xpArray.push(x)
+            else if (isMod || isDev) hiddenMembers.push({ id: x[0], xp: x[1].xp })
+        })
+        xpArray = xpArray.sort((a, b) => b[1].xp - a[1].xp)
+        .map((x, y) => ({ id: x[0], xp: x[1].xp, rank: y+1 }))
+        if (hiddenMembers.length) hiddenMembers = hiddenMembers.sort((a, b) => b.xp - a.xp)
+    }
 
     let trueTotalXP = xpArray.length
-    let foundUser = xpArray.find(x => x.id == userInfo?.id)
-    if (!foundUser) {
-        let foundHidden = hiddenMembers.find(x => x.id == userInfo?.id)
-        if (foundHidden) {
-            foundUser = foundHidden
-            foundUser.hidden = true
+    let foundUser = null
+    if (userInfo?.id) {
+        let rawFound = xpArray.find(x => x.id == userInfo.id)
+        if (rawFound) {
+            foundUser = { id: rawFound.id, xp: rawFound.xp, rank: rawFound.rank }
+        } else {
+            let foundHidden = (rankingsData ? rankingsData.hiddenMembers : hiddenMembers).find(x => x.id == userInfo.id)
+            if (foundHidden) {
+                foundUser = { id: foundHidden.id, xp: foundHidden.xp, hidden: true }
+            }
         }
     }
     if (singleUser) xpArray = xpArray.filter(x => x.id == singleUser)
@@ -608,7 +661,7 @@ app.get("/api/leaderboard/:id", cors(), async function(req, res) {
     let pageCount = Math.ceil(xpArray.length / pageSize)
     let page = Math.max(1, parseInt(req.query.page)) || 1
     
-    let paginated = xpArray.slice((page - 1) * pageSize, (page - 1) * pageSize + pageSize)
+    let paginated = xpArray.slice((page - 1) * pageSize, (page - 1) * pageSize + pageSize).map(x => ({ id: x.id, xp: x.xp, rank: x.rank }))
     let memberList = paginated.map(x => x.id)
     if (loggedIn && !memberList.includes(userInfo.id)) memberList.push(userInfo.id)
     
@@ -629,16 +682,37 @@ app.get("/api/leaderboard/:id", cors(), async function(req, res) {
             color: x.hexColor
         }))
 
-        let members = await guild.members.fetch({user: xd.members}).then(list => list.map(x => ({
-            id: x.user.id,
-            username: x.user.username,
-            displayName: x.user.displayName,
-            discriminator: x.user.discriminator || "0",
-            nickname: x.nickname,
-            avatar: x.displayAvatarURL({format: "png", dynamic: true}),
-            color: x.displayHexColor,
-            roles: x.roles.cache.filter(r => xd.importantRoles.includes(r.id)).map(r => r.id)
-        }) )).catch((() => []))
+        if (!cl._missingMembersCache) cl._missingMembersCache = {}
+        if (!cl._missingMembersCache[xd.guildID]) cl._missingMembersCache[xd.guildID] = {}
+        let missingCache = cl._missingMembersCache[xd.guildID]
+        let now = Date.now()
+
+        let requestedIDs = xd.members || []
+        let toFetch = requestedIDs.filter(id => !guild.members.cache.has(id) && (!missingCache[id] || missingCache[id] < now))
+
+        if (toFetch.length > 0) {
+            await guild.members.fetch({ user: toFetch, time: 8000 }).catch(() => null)
+            for (let id of toFetch) {
+                if (!guild.members.cache.has(id)) missingCache[id] = now + 300000 // cache missing status for 5 minutes
+            }
+        }
+
+        let importantSet = new Set(xd.importantRoles)
+        let members = []
+        for (let id of requestedIDs) {
+            let x = guild.members.cache.get(id)
+            if (!x || !x.user) continue
+            members.push({
+                id: x.user.id,
+                username: x.user.username,
+                displayName: x.user.displayName,
+                discriminator: x.user.discriminator || "0",
+                nickname: x.nickname,
+                avatar: x.displayAvatarURL({format: "png", dynamic: true}),
+                color: x.displayHexColor,
+                roles: x.roles.cache.filter(r => importantSet.has(r.id)).map(r => r.id)
+            })
+        }
 
         return { server, roles, members }
 
@@ -649,13 +723,14 @@ app.get("/api/leaderboard/:id", cors(), async function(req, res) {
     if (!guildData) return res.apiError("Couldn't get server data!")
 
     let guildMembers = guildData.members
+    let guildMembersMap = new Map(guildMembers.map(m => [m.id, m]))
 
     settings = clearDeletedData(settings, guildData.roles)
     if (rewardList.length) rewardList = settings.rewards
 
     paginated = paginated.map(raw => {
         let data = raw
-        let found = guildMembers.find(g => g.id == data.id)
+        let found = guildMembersMap.get(data.id)
         if (found) data = Object.assign(data, found)
         else data.missing = true
         return data
@@ -667,14 +742,14 @@ app.get("/api/leaderboard/:id", cors(), async function(req, res) {
         let foundInPage = paginated.find(x => x.id == userInfo.id && !x.missing)
         if (foundInPage) userLevel = foundInPage
         else {
-            let foundAsMember = guildMembers.find(x => x.id == userInfo.id)
+            let foundAsMember = guildMembersMap.get(userInfo.id)
             if (!foundAsMember && isInGuild) foundAsMember = {
                 partial: true, id: userInfo.id, username: userInfo.username, displayName: userInfo.global_name,
                 discriminator: userInfo.discriminator || "0", color: "#" + (userInfo.accent_color || 0xffffff).toString(16),
                 avatar: `https://cdn.discordapp.com/avatars/${userInfo.id}/${userInfo.avatar}`, roles: []
             }
             if (foundUser && foundAsMember) userLevel = Object.assign(foundUser, foundAsMember)
-            else userLevel = { missing: true, debug: { member: guildMembers.find(x => x.id == userInfo.id)?.id || "-", user: foundUser?.id || "-", info: userInfo?.id || "-" } }
+            else userLevel = { missing: true, debug: { member: guildMembersMap.get(userInfo.id)?.id || "-", user: foundUser?.id || "-", info: userInfo?.id || "-" } }
         }
     }
     if (userLevel.partial) delete userLevel.missing
@@ -703,10 +778,12 @@ app.get("/api/leaderboard/:id", cors(), async function(req, res) {
 })
 
 app.post("/api/editXP", async function(req, res) {
-    if (typeof req.body != "object") return res.apiError("Invalid  data!");
+    if (!req.body || typeof req.body != "object") return res.apiError("Invalid data!");
 
-    let guildID = req.body.guildID
-    if (!guildID) return res.apiError("No guild ID!");
+    let guildID = String(req.body.guildID || "")
+    let targetUserID = String(req.body.user || "")
+    if (!/^\d{10,30}$/.test(guildID)) return res.apiError("No guild ID!");
+    if (!/^\d{10,30}$/.test(targetUserID)) return res.apiError("Invalid user ID!");
 
     let [user, guilds] = await getDiscordInfo(req)
     if (!user || !guilds) return res.apiError("Not logged in!")
@@ -717,22 +794,24 @@ app.post("/api/editXP", async function(req, res) {
     let canManage = canManageServer(foundGuild)
     if (!canManage) return res.apiError("Manage server permission required!")
 
-    let newXP = Math.round(req.body.xp)
-    if (!newXP && newXP !== 0) return res.apiError("Invalid XP amount!")
+    let newXP = Math.round(Number(req.body.xp))
+    if (!Number.isFinite(newXP)) return res.apiError("Invalid XP amount!")
     newXP = tools.clamp(newXP, 0, (1e16 - 1))
 
-    let foundXP = await client.db.fetch(guildID, [`users.${req.body.user}`])
-    if (!foundXP?.users || !foundXP.users[req.body.user]) return res.apiError("This user isn't ranked!")
+    let foundXP = await client.db.fetch(guildID, [`users.${targetUserID}`])
+    if (!foundXP?.users || !foundXP.users[targetUserID]) return res.apiError("This user isn't ranked!")
 
-    client.db.update(guildID, { $set: { [`users.${req.body.user}.xp`]: newXP } }).exec().then(() => res.end("cool and good"))
+    client.db.update(guildID, { $set: { [`users.${targetUserID}.xp`]: newXP } }).exec().then(() => res.end("cool and good"))
     .catch(() => res.apiError("Unknown error!"));
 })
 
 app.post("/api/leaderboardHide", async function(req, res) {
-    if (typeof req.body != "object") return res.apiError("Invalid  data!");
+    if (!req.body || typeof req.body != "object") return res.apiError("Invalid data!");
 
-    let guildID = req.body.guildID
-    if (!guildID) return res.apiError("No guild ID!");
+    let guildID = String(req.body.guildID || "")
+    let targetUserID = String(req.body.user || "")
+    if (!/^\d{10,30}$/.test(guildID)) return res.apiError("No guild ID!");
+    if (!/^\d{10,30}$/.test(targetUserID)) return res.apiError("Invalid user ID!");
 
     let [user, guilds] = await getDiscordInfo(req)
     if (!user || !guilds) return res.apiError("Not logged in!")
@@ -743,19 +822,18 @@ app.post("/api/leaderboardHide", async function(req, res) {
     let canManage = canManageServer(foundGuild)
     if (!canManage) return res.apiError("Manage server permission required!")
 
-    let setHide = notFalse(req.body.hide)
+    let setHide = !!notFalse(req.body.hide)
 
-    let foundXP = await client.db.fetch(guildID, [`users.${req.body.user}`])
-    if (!foundXP?.users || !foundXP.users[req.body.user]) return res.apiError("This user isn't ranked!")
+    let foundXP = await client.db.fetch(guildID, [`users.${targetUserID}`])
+    if (!foundXP?.users || !foundXP.users[targetUserID]) return res.apiError("This user isn't ranked!")
 
-    client.db.update(guildID, { $set: { [`users.${req.body.user}.hidden`]: setHide } }).exec().then(() => res.end("cool and good"))
+    client.db.update(guildID, { $set: { [`users.${targetUserID}.hidden`]: setHide } }).exec().then(() => res.end("cool and good"))
     .catch(() => res.apiError("Unknown error!"));
 })
 
 app.get("/api/xp/:id", cors(), async function(req, res) {
-    let guildID = req.params.id
-    let data = await client.db.fetch(guildID)
-    if (!data) return res.apiError("Invalid server!");
+    let guildID = String(req.params.id || "")
+    if (!/^\d{10,30}$/.test(guildID)) return res.apiError("Invalid server!");
 
     let [user, guilds] = await getDiscordInfo(req)
     if (!user || !guilds) return res.apiError("Not logged in!")
@@ -767,6 +845,9 @@ app.get("/api/xp/:id", cors(), async function(req, res) {
 
     let canManage = canManageServer(foundGuild)
     if (!canManage && !force) return res.apiError("Manage server permission required!")
+
+    let data = await client.db.fetch(guildID)
+    if (!data) return res.apiError("Invalid server!");
 
     let xpList = tools.xpObjToArray(data.users || []).sort((a, b) => b.xp - a.xp)
     
@@ -806,14 +887,14 @@ Think of these codes as a parent signed permission slip for us to get the data t
 app.get("/auth", async function(req, res) {
 
     // if they actually authorized, there will be a code here
-    if (req.query.code && req.query.code.length > 10) { 
+    if (req.query.code && typeof req.query.code === "string" && req.query.code.length > 10) { 
 
         // prove we're allowed to do this
         let authCreds = Buffer.from(`${process.env.DISCORD_ID}:${process.env.DISCORD_SECRET}`).toString('base64');
 
         // make a request to the discord token endpoint, to show that the code is in the right hands
         // tried using rest for this but ran into issues, oh well
-        fetch(discordAPI + "/oauth2/token", {
+        fetch(discordAPI + "oauth2/token", {
             method: "POST",
             headers: {
                 "Authorization": `Basic ${authCreds}`,
@@ -838,12 +919,16 @@ app.get("/auth", async function(req, res) {
 Discord gave us the codes we need to get their private information, let's goooo!
 Now it gets stored in the database for a week, and we give the client our own made up token so we know when it's them */ 
 function storeAuthToken(res, tokens) {
-    let randomNumbers = [tools.rng(1e3, 1e4-1), tools.rng(1e4, 1e5-1), tools.rng(1e5, 1e6-1), tools.rng(1e6, 1e7-1), Number(Date.now().toString().slice(-7))]
-    let randomID = randomNumbers.map(x => x.toString(16)).join("-") // just combine a bunch of random numbers!!!! pretty much anything goes here
-    let expiration = Date.now() + (1000 * tokens.expires_in) // when the token expires (one week)
-    authDB.delete({ expires: { $lt: Date.now() } }).then(() => {}) // clear expired tokens
+    let randomID = require("crypto").randomBytes(32).toString("hex")
+    let expiration = Date.now() + (1000 * (Number(tokens.expires_in) || 604800)) // when the token expires (one week)
+    authDB.delete({ expires: { $lt: Date.now() } }).then(() => {}).catch(() => {}) // clear expired tokens
     authDB.create({ _id: randomID, access_token: tokens.access_token, refresh_token: tokens.refresh_token, expires: expiration }).then((data) => {
-        res.cookie("polaris", randomID, { "expires": new Date(expiration) });
+        res.cookie("polaris", randomID, {
+            expires: new Date(expiration),
+            httpOnly: true,
+            sameSite: "lax",
+            secure: siteURL.startsWith("https")
+        });
         sendRedirect(res, "/?authorized") // sweet, back to the homepage
     }).catch((e) => { console.error(e); sendRedirect(res, "/") })
 }
@@ -854,7 +939,7 @@ But first we need a way to check if the client's token matches up with the one o
 Also, "token" no longer sounds like a word to me */
 let tokenCache = {} // cache tokens to speed things up a little
 async function getDiscordToken(token) {
-    if (!token) return null
+    if (!token || typeof token !== "string" || token.length > 128) return null
     let foundCache = tokenCache[token] // check the cache for the token stuff
     if (foundCache && foundCache.expires > Date.now()) return foundCache // if it exists, send that instead of checking the database
     return await authDB.fetch(token).then(data => { // otherwise, check the database
@@ -873,8 +958,9 @@ async function getDiscordInfo(req, userOnly) {
     let token = await getDiscordToken(req.cookies.polaris) // get discord's tokens using the token in their cookies
     if (!token) return userOnly ? null : [null, null]
 
-    let foundData = discordCache[token] // check for cached data
-    if (foundData && Date.now() <= foundData.expires) return foundData.data // return cached data if it exists and hasn't expired
+    let cacheKey = token._id || req.cookies.polaris
+    let foundData = discordCache[cacheKey] // check for cached data
+    if (foundData && Date.now() <= foundData.expires) return userOnly ? foundData.data[0] : foundData.data // return cached data if it exists and hasn't expired
 
     // the two things the client authorized - user data and guilds. this is all we need
     let options = { auth: false, headers: { authorization: `Bearer ${token.access_token}` } };
@@ -885,7 +971,7 @@ async function getDiscordInfo(req, userOnly) {
 
     if (!userData || !guilds || userData.message || guilds.message || !userData.id) return [null, null] // if discord sends error
     let discordRes = [userData, guilds] // return this as an array, so we can do "let [userData, guilds]"
-    discordCache[token] = {data: discordRes, expires: Date.now() + 15000} // 15 second cache to prevent ratelimits uwu
+    discordCache[cacheKey] = {data: discordRes, expires: Date.now() + 15000} // 15 second cache to prevent ratelimits uwu
     return discordRes
 }
 
@@ -895,13 +981,17 @@ app.get("/logout", async function(req, res) {
     let token = await getDiscordToken(req.cookies.polaris)
     if (!token) return sendRedirect(res, "/")
 
+    delete tokenCache[req.cookies.polaris]
+    delete discordCache[token._id || req.cookies.polaris]
+    authDB.delete({ _id: token._id || req.cookies.polaris }).catch(() => {})
+
     fetch(discordAPI + "oauth2/token/revoke", {
         method: "POST",
         headers: { "Content-type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
-            client_id: auth.id,
-            client_secret: auth.secret,
-            token
+            client_id: process.env.DISCORD_ID,
+            client_secret: process.env.DISCORD_SECRET,
+            token: token.access_token
         })
     }).then(() => { // discord has invalidated the token!
         res.clearCookie("polaris"); // remove token from cookies

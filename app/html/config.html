@@ -4,9 +4,9 @@
     <meta charset="UTF-8">
     <link href="/css/polaris.css?v=3" type="text/css" rel="stylesheet">
     <link rel="icon" href="/assets/polaris.svg">
-    <title>Polaris</title>
+    <title>Femboy Polaris</title>
 
-    <meta property="og:title" content="Polaris">
+    <meta property="og:title" content="Femboy Polaris">
     <meta property="og:description" content="An open-source XP bot">
     <meta property="og:type" content="website">
     <meta name="theme-color" content="#00ff80">
@@ -371,9 +371,9 @@
         
                         <select>
                             <option value="x" selected disabled>Member</option>
-                            <option value="[[@]]">@mention (e.g. @Polaris)</option>
-                            <option value="[[DISPLAYNAME]]">Display Name (e.g. Polaris)</option>
-                            <option value="[[USERNAME]]">Username (e.g. polaris)</option>
+                            <option value="[[@]]">@mention (e.g. @Femboy Polaris)</option>
+                            <option value="[[DISPLAYNAME]]">Display Name (e.g. Femboy Polaris)</option>
+                            <option value="[[USERNAME]]">Username (e.g. femboypolaris)</option>
                             <option value="[[ID]]">ID (e.g. 98341916...)</option>
                             <option value="[[NICKNAME]]">Nickname</option>
                             <option value="[[AVATAR]]">Avatar URL</option>
@@ -830,7 +830,7 @@
 
         <div class="settingBox box" style="height: 145px">
             <h2>Custom /top Embed Color</h2>
-            <p class="details">Changes the embed color when using /top.<br>Uses Polaris' green by default.</p>
+            <p class="details">Changes the embed color when using /top.<br>Uses Femboy Polaris' green by default.</p>
             <div class="centerflex" style="height: 45px">
                 <label style="margin-top: 5px"; class="slider">
                     <input type="checkbox" tabindex="0" id="useCustomEmbedColTop" onchange="$('#customEmbedColTopConfig').toggle($(this).prop('checked')); checkUnsavedChanges()">
@@ -916,10 +916,14 @@
         }
         else $('#desmosJumpscare').removeAttr("style").text("Looks like Desmos failed to load ¯\\_(ツ)_/¯")
 
+        function escapeHTML(str) {
+            return String(str ?? "").replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]))
+        }
+
         $('.serverName').text(data.guild.name)
         $('.serverMembers').text(commafy(data.guild.members || "?") + " member" + (data.guild.members == 1 ? "" : "s"))
         $('.serverIcon').attr('src', data.guild.icon || "/assets/avatar.png")
-        $('#otherServers').append(data.ownedServers.map(x => `<option value="${x.id}">${x.name}</option>`))
+        $('#otherServers').append(data.ownedServers.map(x => `<option value="${escapeHTML(x.id)}">${escapeHTML(x.name)}</option>`))
         
         // fill in inputs with current values
         $('input[db], select[db]').each(function() {
@@ -978,7 +982,7 @@
         })
 
         presets.forEach(x => {
-            $('#curvePresets').append(`<option value="${x.name}">${x.name}</option>`)
+            $('#curvePresets').append($('<option>').val(x.name).text(x.name))
         })
 
         let foundPreset = presets.find(x => x.name != data.guild.name && JSON.stringify([x.curve, x.round, x.bestRange]) == JSON.stringify([db.curve, db.rounding, [db.gain.min, db.gain.max]])) || presets[0]
@@ -988,10 +992,10 @@
         $('#curvePresets').change(function() {
             let newVal = $(this).val()
             let foundPreset = presets.find(x => x.name == newVal) || presets[0]
-            $('#presetDesc').html(foundPreset.desc)
+            $('#presetDesc').text(foundPreset.desc)
             $('#presetCurve').html(`${+foundPreset.curve[3].toFixed(4)}x<sup>3</sup> + ${+foundPreset.curve[2].toFixed(4)}x<sup>2</sup> + ${+foundPreset.curve[1].toFixed(4)}x`)
-            $('#presetRound').html(foundPreset.round)
-            $('#presetXP').html(foundPreset.bestRange.join(" - "))
+            $('#presetRound').text(foundPreset.round)
+            $('#presetXP').text(foundPreset.bestRange.join(" - "))
             displayCurveDifficulty(foundPreset.curve, $('#presetDifficulty'))
         })
         $('#curvePresets').trigger('change') // default preset
@@ -1162,11 +1166,11 @@
                 if (!foundRole) return
                 else $(`#rewardRoleSelect option[value=${reward.id}]`).prop('hidden', true)
 
-                $('#rewards div[col="lvl"]').append(`<p class="rewardLevel numberinput" tabindex="-1" roleID="${reward.id}" min="1" max="1000" default="10" contenteditable>${reward.level}</p>`)
-                $('#rewards div[col="role"]').append(`<p class="longname" style="color: ${foundRole.color == "#000000" ? "var(--defaultrolecol)" : foundRole.color}">${foundRole.name}</p>`)
-                $('#rewards div[col="keep"]').append(`<p class="toggleRow" tr="keep" tabindex="0" roleID="${reward.id}" style="color: ${reward.keep ? "lime" : "nah"}">${reward.keep ? "Yes" : "No"}${reward.noSync && !excludeEnabled ? "*" : ""}</p>`)
-                $('#rewards div[col="exclude"]').append(`<p class="toggleRow" tr="noSync" tabindex="0" roleID="${reward.id}" style="color: ${reward.noSync ? "red" : "lime"}">${reward.noSync ? "No" : "Yes"}</p>`)
-                $('#rewards div[col="delete"]').append(`<p class="deleteRow deleteReward" tabindex="0" roleID="${reward.id}">🗑️</p>`)
+                $('#rewards div[col="lvl"]').append(`<p class="rewardLevel numberinput" tabindex="-1" roleID="${escapeHTML(reward.id)}" min="1" max="1000" default="10" contenteditable>${escapeHTML(reward.level)}</p>`)
+                $('#rewards div[col="role"]').append($('<p class="longname">').css("color", foundRole.color == "#000000" ? "var(--defaultrolecol)" : foundRole.color).text(foundRole.name))
+                $('#rewards div[col="keep"]').append(`<p class="toggleRow" tr="keep" tabindex="0" roleID="${escapeHTML(reward.id)}" style="color: ${reward.keep ? "lime" : "nah"}">${reward.keep ? "Yes" : "No"}${reward.noSync && !excludeEnabled ? "*" : ""}</p>`)
+                $('#rewards div[col="exclude"]').append(`<p class="toggleRow" tr="noSync" tabindex="0" roleID="${escapeHTML(reward.id)}" style="color: ${reward.noSync ? "red" : "lime"}">${reward.noSync ? "No" : "Yes"}</p>`)
+                $('#rewards div[col="delete"]').append(`<p class="deleteRow deleteReward" tabindex="0" roleID="${escapeHTML(reward.id)}">🗑️</p>`)
             })
             $('#rewardCount').html(rewards.length)
             checkUnsavedChanges()
@@ -1183,7 +1187,7 @@
                 if (option.val() == data.guild.id) return
                 option.css("color", "")
                 option.prop("disabled", true)
-                option.html(option.html() + " -- too high to grant!")
+                option.text(option.text() + " -- too high to grant!")
             }
 
             return roleSelect.append(option)
@@ -1191,15 +1195,19 @@
 
         // role selectors
         data.roles.forEach(x => {
-            let roleOption = $(`<option value="${x.id}">${x.name}</option>`)
+            let roleOption = $('<option>').val(x.id).text(x.name)
             roleOption.css("color", x.color == "#000000" ? "var(--defaultrolecol)" : x.color)
 
             if (!x.managed) appendRoleSelect('#rewardRoleSelect', roleOption, x, true, rewards.some(r => r.id == x.id))
             appendRoleSelect('#roleMultiplierSelect', roleOption, x, false, roleMultipliers.some(r => r.id == x.id))
         })
 
-        let channelPrefixes = { channel: "#", category: "&gt; ", vc: "🔊 ", thread: "└─ ", forum: "💬 "}
-        let chMultiplierChannels = data.channels.map(x => `<option ${x.type == "category" ? `style="font-weight: bold"` : ""} value="${x.id}">${channelPrefixes[x.type] || "* "}${x.name}</option>`)
+        let channelPrefixes = { channel: "#", category: "> ", vc: "🔊 ", thread: "└─ ", forum: "💬 "}
+        let chMultiplierChannels = data.channels.map(x => {
+            let opt = $('<option>').val(x.id).text((channelPrefixes[x.type] || "* ") + x.name)
+            if (x.type == "category") opt.css("font-weight", "bold")
+            return opt
+        })
         $('#channelMultiplierSelect').append("<option value='none' selected disabled>(channel)</option>").append(chMultiplierChannels)
 
 
@@ -1284,9 +1292,9 @@
                 if (!foundRole) return
                 else $(`#roleMultiplierSelect option[value=${boost.id}]`).prop('hidden', true)
 
-                $('#roleMultipliers div[col="boost"]').append(`<p class="roleMultiplierAmount numberinput" roleID="${boost.id}" min="0" max="100" decimals="4" default="1" tabindex="-1" contenteditable>${+boost.boost}x</p>`)
-                $('#roleMultipliers div[col="role"]').append(`<p class="longname" style="color: ${foundRole.color == "#000000" ? "var(--defaultrolecol)" : foundRole.color}">${foundRole.name}</p>`)
-                $('#roleMultipliers div[col="delete"]').append(`<p class="deleteRow deleteRoleMultiplier" tabindex="0" roleID="${boost.id}">🗑️</p>`)
+                $('#roleMultipliers div[col="boost"]').append(`<p class="roleMultiplierAmount numberinput" roleID="${escapeHTML(boost.id)}" min="0" max="100" decimals="4" default="1" tabindex="-1" contenteditable>${+boost.boost}x</p>`)
+                $('#roleMultipliers div[col="role"]').append($('<p class="longname">').css("color", foundRole.color == "#000000" ? "var(--defaultrolecol)" : foundRole.color).text(foundRole.name))
+                $('#roleMultipliers div[col="delete"]').append(`<p class="deleteRow deleteRoleMultiplier" tabindex="0" roleID="${escapeHTML(boost.id)}">🗑️</p>`)
             })
             $('#roleMultiplierCount').html(roleMultipliers.length)
             checkUnsavedChanges()
@@ -1343,9 +1351,9 @@
                 if (!foundChannel) return
                 else $(`#channelMultiplierSelect option[value=${boost.id}]`).prop('hidden', true)
 
-                $('#channelMultipliers div[col="boost"]').append(`<p class="channelMultiplierAmount numberinput" channelID="${boost.id}" min="0" max="100" decimals="4" default="1" tabindex="-1" contenteditable>${+boost.boost}x</p>`)
-                $('#channelMultipliers div[col="channel"]').append(`<p class="longname">${channelPrefixes[foundChannel.type] || "* "}${foundChannel.name}</p>`)
-                $('#channelMultipliers div[col="delete"]').append(`<p class="deleteRow deleteChannelMultiplier" tabindex="0" channelID="${boost.id}">🗑️</p>`)
+                $('#channelMultipliers div[col="boost"]').append(`<p class="channelMultiplierAmount numberinput" channelID="${escapeHTML(boost.id)}" min="0" max="100" decimals="4" default="1" tabindex="-1" contenteditable>${+boost.boost}x</p>`)
+                $('#channelMultipliers div[col="channel"]').append($('<p class="longname">').text((channelPrefixes[foundChannel.type] || "* ") + foundChannel.name))
+                $('#channelMultipliers div[col="delete"]').append(`<p class="deleteRow deleteChannelMultiplier" tabindex="0" channelID="${escapeHTML(boost.id)}">🗑️</p>`)
             })
             $('#channelMultiplierCount').html(channelMultipliers.length)
             checkUnsavedChanges()
@@ -1380,7 +1388,7 @@
 
 
         // level up message channel
-        $("#lvlMessageSelect").append(data.channels.filter(x => x.type == "channel").map(x => `<option value="${x.id}">#${x.name}</option>`))
+        $("#lvlMessageSelect").append(data.channels.filter(x => x.type == "channel").map(x => $('<option>').val(x.id).text("#" + x.name)))
         $("#lvlMessageSelect").val(db.levelUp.channel)
         if (!$("#lvlMessageSelect").val()) $("#lvlMessageSelect").val("current")
 
