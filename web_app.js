@@ -697,9 +697,36 @@ app.get("/api/leaderboard/:id", cors(), async function(req, res) {
         let toFetch = requestedIDs.filter(id => !guild.members.cache.has(id) && (!missingCache[id] || missingCache[id] < now))
 
         if (toFetch.length > 0) {
-            await guild.members.fetch({ user: toFetch, time: 8000 }).catch(() => null)
-            for (let id of toFetch) {
-                if (!guild.members.cache.has(id)) missingCache[id] = now + 300000 // cache missing status for 5 minutes
+            // Try fast Gateway chunk fetch first (1.5s timeout so it never hangs if Server Members Intent is off)
+            let gwResult = cl._gwMemberFetchBlocked
+                ? null
+                : await guild.members.fetch({ user: toFetch, time: 1500 }).catch(() => {
+                    cl._gwMemberFetchBlocked = true
+                    return null
+                })
+
+            // If Gateway chunk fetch was blocked/timed out (no Server Members Intent), fall back to HTTP REST API
+            // GET /guilds/:id/members/:user_id does NOT require any privileged intents and automatically caches in guild.members.cache
+            if (!gwResult) {
+                let stillUnfetched = toFetch.filter(id => !guild.members.cache.has(id))
+                let batchSize = 10
+                let restStart = Date.now()
+                for (let i = 0; i < stillUnfetched.length; i += batchSize) {
+                    if (Date.now() - restStart > 4500) break
+                    let batch = stillUnfetched.slice(i, i + batchSize)
+                    await Promise.all(batch.map(id =>
+                        guild.members.fetch(String(id)).catch(err => {
+                            if (err && (err.status === 404 || err.code === 10007 || err.code === 10013)) {
+                                missingCache[id] = now + 300000 // cache missing status for 5 minutes
+                            }
+                            return null
+                        })
+                    ))
+                }
+            } else {
+                for (let id of toFetch) {
+                    if (!guild.members.cache.has(id)) missingCache[id] = now + 300000 // cache missing status for 5 minutes
+                }
             }
         }
 
@@ -707,17 +734,33 @@ app.get("/api/leaderboard/:id", cors(), async function(req, res) {
         let members = []
         for (let id of requestedIDs) {
             let x = guild.members.cache.get(id)
-            if (!x || !x.user) continue
-            members.push({
-                id: x.user.id,
-                username: x.user.username,
-                displayName: x.user.displayName,
-                discriminator: x.user.discriminator || "0",
-                nickname: x.nickname,
-                avatar: x.displayAvatarURL({format: "png", dynamic: true}),
-                color: x.displayHexColor,
-                roles: x.roles.cache.filter(r => importantSet.has(r.id)).map(r => r.id)
-            })
+            if (x && x.user) {
+                members.push({
+                    id: x.user.id,
+                    username: x.user.username,
+                    displayName: x.user.displayName,
+                    discriminator: x.user.discriminator || "0",
+                    nickname: x.nickname,
+                    avatar: x.displayAvatarURL({format: "png", dynamic: true}),
+                    color: x.displayHexColor,
+                    roles: x.roles.cache.filter(r => importantSet.has(r.id)).map(r => r.id)
+                })
+            } else {
+                // Fallback to global user cache if cached from interactions/messages
+                let u = cl.users.cache.get(id)
+                if (u) {
+                    members.push({
+                        id: u.id,
+                        username: u.username,
+                        displayName: u.displayName || u.username,
+                        discriminator: u.discriminator || "0",
+                        nickname: null,
+                        avatar: u.displayAvatarURL({format: "png", dynamic: true}),
+                        color: "#ffffff",
+                        roles: []
+                    })
+                }
+            }
         }
 
         return { server, roles, members }
