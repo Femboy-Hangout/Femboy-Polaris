@@ -2,25 +2,26 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <link href="./css/polaris.css" type="text/css" rel="stylesheet">
-    <link rel="icon" href="./assets/polaris.svg">
+    <link href="/css/polaris.css?v=2" type="text/css" rel="stylesheet">
+    <link rel="icon" type="image/png" href="/assets/polaris.png?v=2">
     <title>Femboy Polaris</title>    
     <meta property="og:title" content="Femboy Polaris">
     <meta property="og:description" content="An open-source XP bot">
+    <meta property="og:image" content="/assets/polaris.png?v=2">
     <meta property="og:type" content="website">
-    <meta name="theme-color" content="#00ff80">
+    <meta name="theme-color" content="#ffc2d4">
     <meta name="twitter:card" content="summary">
 </head>
 <body style="height: 100%">
     <div class="middleflex" style="flex-direction: column; width: 100%; height: 100%">
         <div class="middleflex" style="margin-bottom: 40px">
-            <img style="height: 160px; margin-right: 45px; user-select: none;" src="./assets/polaris.svg">
+            <img style="height: 160px; margin-right: 45px; user-select: none;" src="/assets/polaris.png?v=2">
             <div>
                 <h1 style="color: var(--polarisgreen); font-size: 52px">Femboy Polaris</h1>
                 <p style="font-size: 26px; margin-top: 0px; line-height: 45px;">A fully customizable, bullshit-free levelling bot.</p>
                 <div id="buttonList" class="centerflex spacedflex" style="margin-top: 25px; height: 50px">
-                    <a style="display: none" href="./invite" tabindex="-1" target="_blank" id="addLink"> <button class="fancybutton">Add to Discord</button> </a>
-                    <a style="display: none" href="./servers" tabindex="-1" id="manageLink"> <button class="fancybutton" id="manageButton">Manage servers</button> </a>
+                    <a href="/invite" tabindex="-1" target="_blank" id="addLink"> <button class="fancybutton">Add to Discord</button> </a>
+                    <a href="/servers" tabindex="-1" id="manageLink"> <button class="fancybutton" id="manageButton">Manage servers</button> </a>
                 </div>
             </div>
         </div>
@@ -35,8 +36,8 @@
     </div>
 </body>
 
-<script type="text/javascript" src="./polaris.js"></script>
 <script type="text/javascript" src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.js"></script>
+<script type="text/javascript" src="/polaris.js?v=2"></script>
 <script async src="https://www.googletagmanager.com/gtag/js?id=UA-135255146-1"></script>
 <script>window.dataLayer = window.dataLayer || []; function gtag() { dataLayer.push(arguments); } gtag('js', new Date()); gtag('config', 'UA-135255146-1');</script>
 
@@ -49,12 +50,15 @@ if (window.location.search.includes("authorized")) {
 }
 delete localStorage.polaris_url
 
-Fetch("./api/loggedin").then(data => {
+Fetch("/api/loggedin").then(data => {
     if (!data || !data.login || !data.login.id) $('#manageButton').text("Log in");
-    if (data && data.botPublic) $("#addLink").show();
-    $('#manageLink').show()
+    else $('#manageButton').text("Manage servers");
+    if (data && data.botPublic === false) $("#addLink").hide();
+    else $("#addLink").show();
+    $('#manageLink').show();
 }).catch(() => {
-    $('#manageLink').show()
+    $('#addLink').show();
+    $('#manageLink').show();
 })
 
 $(document).ready(function(){

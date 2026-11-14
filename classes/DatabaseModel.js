@@ -241,7 +241,8 @@ class Model {
 
         this.fetch = (id, filter, options) => {
             if (id == null || typeof id !== "string") return Promise.resolve(null);
-            if (!this.isServerModel) return this.model.findById(id, filter, options).lean();
+            if (Array.isArray(filter)) filter = filter.filter(Boolean);
+            if (!this.isServerModel) return this.model.findById(id, filter, options).maxTimeMS(5000).lean();
 
             if (this.cache.has(id)) {
                 return Promise.resolve(this.cloneDoc(this.cache.get(id)));
@@ -251,7 +252,7 @@ class Model {
             // return the projected query quickly while warming the full cache in the background.
             if (filter) {
                 this.loadFull(id).catch(() => null);
-                return this.model.findById(id, filter, options).lean().then(raw => this.hydrateDoc(raw));
+                return this.model.findById(id, filter, options).maxTimeMS(10000).lean().then(raw => this.hydrateDoc(raw));
             }
 
             return this.loadFull(id).then(doc => this.cloneDoc(doc));
@@ -268,7 +269,7 @@ class Model {
                     this.pendingUpdates.get(safeId).push(sanitized);
                 }
             }
-            return this.model.findByIdAndUpdate(safeId, sanitized || data, options);
+            return this.model.updateOne({ _id: safeId }, sanitized || data, options);
         };
 
         this.create = (data, options) => {
@@ -284,7 +285,32 @@ class Model {
         };
 
         this.find = (query, filter, options) => {
-            return this.model.find(query, filter, options).lean().then(list => {
+            if (Array.isArray(filter)) filter = filter.filter(Boolean);
+            if (this.isServerModel && query && query._id && Array.isArray(query._id.$in)) {
+                const requestedIds = query._id.$in.map(x => String(x));
+                const cachedResults = [];
+                const missingIds = [];
+                const settingsOnly = (filter === "settings");
+                for (const gid of requestedIds) {
+                    if (this.cache.has(gid)) {
+                        const doc = this.cache.get(gid);
+                        cachedResults.push(settingsOnly
+                            ? { _id: doc._id, settings: structuredClone(doc.settings), info: structuredClone(doc.info) }
+                            : this.cloneDoc(doc)
+                        );
+                    } else {
+                        missingIds.push(gid);
+                    }
+                }
+                if (!missingIds.length) return Promise.resolve(cachedResults);
+                return this.model.find({ _id: { $in: missingIds } }, filter, options).maxTimeMS(5000).lean()
+                    .then(list => {
+                        const fetched = Array.isArray(list) ? list.map(raw => this.hydrateDoc(raw)).filter(Boolean) : [];
+                        return cachedResults.concat(fetched);
+                    })
+                    .catch(() => cachedResults);
+            }
+            return this.model.find(query, filter, options).maxTimeMS(10000).lean().then(list => {
                 if (!this.isServerModel || !Array.isArray(list)) return list;
                 return list.map(raw => {
                     if (raw && this.cache.has(raw._id)) return this.cloneDoc(this.cache.get(raw._id));

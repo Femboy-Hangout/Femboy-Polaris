@@ -77,11 +77,17 @@ const discord_auth = discordAPI + `oauth2/authorize?client_id=${process.env.DISC
 // use this for discord requests
 const rest = new REST({ version: '9' }).setToken(process.env.DISCORD_TOKEN);
 
-// discord perms
-const manage_roles = Number(Discord.PermissionFlagsBits.ManageRoles)
-const manage_messages = Number(Discord.PermissionFlagsBits.ManageMessages)
-const manage_server = Number(Discord.PermissionFlagsBits.ManageGuild)
-const server_admin = Number(Discord.PermissionFlagsBits.Administrator)
+// discord perms (use BigInt for 64-bit Discord permission bitfields)
+const manage_roles = Discord.PermissionFlagsBits.ManageRoles
+const manage_messages = Discord.PermissionFlagsBits.ManageMessages
+const manage_server = Discord.PermissionFlagsBits.ManageGuild
+const server_admin = Discord.PermissionFlagsBits.Administrator
+
+function hasPerm(perms, flag) {
+    if (!perms) return false
+    try { return (BigInt(perms) & BigInt(flag)) !== 0n }
+    catch { return false }
+}
 
 // database
 let schema = new mongoose.Schema({
@@ -102,7 +108,7 @@ function sendRedirect(res, name) {
 
 function canManageServer(guild) {
     if (!guild) return false
-    return guild.owner || (guild.permissions & manage_server) || (guild.permissions & server_admin)
+    return !!(guild.owner || hasPerm(guild.permissions, manage_server) || hasPerm(guild.permissions, server_admin))
 }
 
 function botIsPublic() {
@@ -157,7 +163,6 @@ app.get("/invite/:id?", (req, res) => {
 app.get("/api/loggedin", async function(req, res) {
     let botPublic = await botIsPublic()
     let info = await getDiscordInfo(req, true)
-    console.log(info)
     return res.send({ login: info ? { id: info.id, username: info.username } : null, botPublic })
 })
 
@@ -171,12 +176,13 @@ app.get("/api/guilds", async function(req, res) {
     if (!user || !guilds) return res.apiError("Not logged in!", "login")
 
     // don't send all user stuff, just the important things
-    let userData = { id: user.id, username: user.username, displayName: user.global_name, avatar: user.avatar, color: user.banner_color }
+    let userData = { id: user.id, username: user.username, displayName: user.global_name || user.username, avatar: user.avatar, color: user.banner_color }
+    let isDev = tools.isDev(user)
 
     // find all servers that exist in the database + the user is currently in
     let guildList = guilds.map(x => x.id)
     let foundServers = await client.db.find({ "_id": { $in: guildList } }, "settings").catch(() => [])
-    let validServers = guilds.filter(x => x.owner || (x.permissions & manage_server) || foundServers.some(g => g._id == x.id)) // filter to just the servers above, OR manageable servers
+    let validServers = guilds.filter(x => canManageServer(x) || isDev || foundServers.some(g => g._id == x.id)) // filter to just the servers above, OR manageable servers
 
     let activeIDs = await client.shard.broadcastEval(async (cl, xd) => {
         return xd.ids.filter(x => cl.guilds.cache.has(x))
@@ -184,18 +190,18 @@ app.get("/api/guilds", async function(req, res) {
     activeIDs = activeIDs.flat()
 
     validServers = validServers.map(x => {
-        let p = x.permissions // check permissions
+        let p = x.permissions // check permissions (64-bit bitfield string)
         let inServer = activeIDs.includes(x.id)
-        let admin = x.owner || !!(p & server_admin)
+        let admin = !!(x.owner || isDev || hasPerm(p, server_admin))
         let perms = {
-            owner: x.owner,
-            server: admin || !!(p & manage_server),
-            roles: admin || !!(p & manage_roles),
-            messages: admin || !!(p & manage_messages),
+            owner: !!x.owner,
+            server: !!(admin || hasPerm(p, manage_server)),
+            roles: !!(admin || hasPerm(p, manage_roles)),
+            messages: !!(admin || hasPerm(p, manage_messages)),
         }
         let foundDB = foundServers.find(g => g._id == x.id)
-        let xpEnabled = inServer && foundDB?.settings?.enabled  // if xp is enabled for this server
-        let hasLeaderboard = xpEnabled && !foundDB.settings.leaderboard.disabled // if leaderboard is enabled
+        let xpEnabled = !!(inServer && foundDB?.settings?.enabled)  // if xp is enabled for this server
+        let hasLeaderboard = !!(xpEnabled && !foundDB.settings.leaderboard.disabled) // if leaderboard is enabled
         return { id: x.id, name: x.name, icon: x.icon, permissions: perms, xp: xpEnabled, inServer, leaderboard: hasLeaderboard, hasData: !!foundDB?.settings }
     })
 
@@ -921,9 +927,12 @@ Now it gets stored in the database for a week, and we give the client our own ma
 function storeAuthToken(res, tokens) {
     let randomID = require("crypto").randomBytes(32).toString("hex")
     let expiration = Date.now() + (1000 * (Number(tokens.expires_in) || 604800)) // when the token expires (one week)
+    let tokenObj = { _id: randomID, access_token: tokens.access_token, refresh_token: tokens.refresh_token, expires: expiration }
+    tokenCache[randomID] = tokenObj
     authDB.delete({ expires: { $lt: Date.now() } }).then(() => {}).catch(() => {}) // clear expired tokens
-    authDB.create({ _id: randomID, access_token: tokens.access_token, refresh_token: tokens.refresh_token, expires: expiration }).then((data) => {
+    authDB.create(tokenObj).then(() => {
         res.cookie("polaris", randomID, {
+            path: "/",
             expires: new Date(expiration),
             httpOnly: true,
             sameSite: "lax",
@@ -941,14 +950,17 @@ let tokenCache = {} // cache tokens to speed things up a little
 async function getDiscordToken(token) {
     if (!token || typeof token !== "string" || token.length > 128) return null
     let foundCache = tokenCache[token] // check the cache for the token stuff
-    if (foundCache && foundCache.expires > Date.now()) return foundCache // if it exists, send that instead of checking the database
-    return await authDB.fetch(token).then(data => { // otherwise, check the database
+    if (foundCache && foundCache.expires > Date.now()) return foundCache.invalid ? null : foundCache // if it exists, send that instead of checking the database
+    let timeoutPromise = new Promise(resolve => setTimeout(() => resolve(null), 5000))
+    let fetchPromise = authDB.fetch(token).then(data => { // otherwise, check the database
         if (data && data.access_token && data.expires > Date.now()) { // if a token was found, cache and return it
             tokenCache[token] = data
             return data
         }
-        else return null // if no token was found, return nothing
-    }).catch(e => null)
+        tokenCache[token] = { invalid: true, expires: Date.now() + 60000 }
+        return null // if no token was found, return nothing
+    }).catch(() => null)
+    return await Promise.race([fetchPromise, timeoutPromise])
 }
 
 /* STEP 5
@@ -979,6 +991,7 @@ async function getDiscordInfo(req, userOnly) {
 If the client wants to log out, we should probably respect that and delete their stuff */
 app.get("/logout", async function(req, res) {
     let token = await getDiscordToken(req.cookies.polaris)
+    res.clearCookie("polaris", { path: "/" });
     if (!token) return sendRedirect(res, "/")
 
     delete tokenCache[req.cookies.polaris]
@@ -994,7 +1007,6 @@ app.get("/logout", async function(req, res) {
             token: token.access_token
         })
     }).then(() => { // discord has invalidated the token!
-        res.clearCookie("polaris"); // remove token from cookies
         sendRedirect(res, "/"); // return home
     }).catch(e => sendRedirect(res, "/"))
 })

@@ -9,7 +9,8 @@ metadata: {
 
 async run(client, int, tools) {
 
-    let versionNumber = client.version.version != Math.round(client.version.version) ? client.version.version : client.version.version.toFixed(1)
+    let rawVer = client.version.version
+    let versionNumber = (typeof rawVer === "number" && rawVer == Math.round(rawVer)) ? rawVer.toFixed(1) : String(rawVer)
 
     let stats = await client.shard.broadcastEval(cl => ({ guilds: cl.guilds.cache.size, users: cl.users.cache.size }))
     let totalServers = stats.reduce((a, b) => a + b.guilds, 0)

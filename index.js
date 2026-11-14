@@ -7,10 +7,20 @@ const Tools = require("./classes/Tools.js")
 const Model = require("./classes/DatabaseModel.js")
 
 // automatic files: these handle discord status and version number, manage them with the dev commands
+const pkgVersion = require("./package.json").version
 const autoPath = "./json/auto/"
 if (!fs.existsSync(autoPath)) fs.mkdirSync(autoPath)
 if (!fs.existsSync(autoPath + "status.json")) fs.copyFileSync("./json/default_status.json", autoPath + "status.json")
-if (!fs.existsSync(autoPath + "version.json")) fs.writeFileSync(autoPath + "version.json", JSON.stringify({ version: "1.0.0", updated: Date.now() }, null, 2))
+if (!fs.existsSync(autoPath + "version.json")) {
+    fs.writeFileSync(autoPath + "version.json", JSON.stringify({ version: pkgVersion, updated: Date.now() }, null, 2))
+} else {
+    try {
+        const savedVer = JSON.parse(fs.readFileSync(autoPath + "version.json", "utf8"))
+        if (savedVer.version !== pkgVersion) {
+            fs.writeFileSync(autoPath + "version.json", JSON.stringify({ version: pkgVersion, updated: Date.now() }, null, 2))
+        }
+    } catch {}
+}
 
 const rawStatus = require("./json/auto/status.json")
 const version = require("./json/auto/version.json")
